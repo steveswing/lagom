@@ -61,7 +61,7 @@
             </dependency>
             <dependency>
                 <groupId>com.lightbend.lagom</groupId>
-                <artifactId>lagom-javadsl-persistence_${scala.binary.version}</artifactId>
+                <artifactId>lagom-javadsl-persistence-cassandra_${scala.binary.version}</artifactId>
                 <version>${lagom.version}</version>
             </dependency>
             <dependency>
@@ -85,11 +85,5 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-
-        <!-- These properties get overridden by the launcher in the tests, but are useful here for opening this
-            project in an IDE for example -->
-        <lagom.version>1.1.0-SNAPSHOT</lagom.version>
-        <play.version>2.5.4</play.version>
-        <scala.binary.version>2.11</scala.binary.version>
     </properties>
 </project>
