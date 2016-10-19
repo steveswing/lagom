@@ -1,3 +1,8 @@
+import java.net.InetSocketAddress
+import java.nio.channels.ServerSocketChannel
+import java.util.{Timer, TimerTask}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+
 import sbt.ScriptedPlugin
 import Tests._
 import com.typesafe.sbt.SbtMultiJvm
@@ -9,31 +14,23 @@ import com.typesafe.sbt.SbtScalariform.ScalariformKeys
 import de.heikoseeberger.sbtheader.HeaderPattern
 
 val PlayVersion = "2.5.4"
-val AkkaVersion = "2.4.8"
+val AkkaVersion = "2.4.10"
 val AkkaPersistenceCassandraVersion = "0.17"
 val ScalaTestVersion = "2.2.4"
-val JacksonVersion = "2.7.2"
+val JacksonVersion = "2.7.8"
 val CassandraAllVersion = "3.0.2"
 val GuavaVersion = "19.0"
 val MavenVersion = "3.3.9"
-val NettyVersion = "4.0.36"
-
-// NOTE ON DEPENDENCIES
-
-// Since we support maven, we need to support mavens somewhat unintuitive dependency resolution mechanism. If two
-// versions of the same library are requested in maven, maven doesn't resolve the most recent version, it resolves
-// the version that is nearest to the root in the dependency graph.  So, when we depend on play, which 4 descendents
-// down the tree brings in netty-http-codec 4.0.36 which brings in netty-handler 4.0.36, and we also depend on
-// netty-reactive-streams, which brings in netty-handler 4.0.33, since, that's much higher in the tree than the other
-// path to it, we 4.0.33, and netty-http-codec 4.0.36 is incompatible with netty-handler 4.0.33, and so, well,
-// thankyou maven.
-
-// So you'll find here a lot of explicit adding of dependencies that are unnecessary in other dependency management
-// mechanisms where transitive conflict resolution is done by following semantic versioning rules, but's it's necessary
-// for maven to work.
+val NettyVersion = "4.0.40.Final"
+val KafkaVersion = "0.10.0.1"
+val AkkaStreamKafka = "0.12"
+val Log4j = "1.2.17"
+val ScalaJava8CompatVersion = "0.7.0"
 
 val scalaTest = "org.scalatest" %% "scalatest" % ScalaTestVersion
 val guava = "com.google.guava" % "guava" % GuavaVersion
+val log4J = "log4j" % "log4j" % Log4j
+val scalaJava8Compat = "org.scala-lang.modules" %% "scala-java8-compat" % ScalaJava8CompatVersion
 
 def common: Seq[Setting[_]] = releaseSettings ++ bintraySettings ++ Seq(
   organization := "com.lightbend.lagom",
@@ -70,6 +67,20 @@ def common: Seq[Setting[_]] = releaseSettings ++ bintraySettings ++ Seq(
         <url>https://github.com/lagom</url>
       </developer>
     </developers>
+    <dependencyManagement>
+      <dependencies>
+        {
+        // todo - put this in a parent pom rather than in each project
+        Seq("buffer", "codec", "codec-http", "common", "handler", "transport", "transport-native-epoll").map { nettyDep =>
+          <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-{nettyDep}</artifactId>
+            <version>{NettyVersion}</version>
+          </dependency>
+        }
+        }
+      </dependencies>
+    </dependencyManagement>
   },
   pomIncludeRepository := { _ => false },
  
@@ -157,9 +168,17 @@ val defaultMultiJvmOptions: List[String] = {
   "-Xmx128m" :: properties
 }
 
+def databasePortSetting: String = {
+  val serverSocket = ServerSocketChannel.open().socket()
+  serverSocket.bind(new InetSocketAddress("127.0.0.1", 0))
+  val port = serverSocket.getLocalPort
+  serverSocket.close()
+  s"-Ddatabase.port=$port"
+}
+
 def multiJvmTestSettings: Seq[Setting[_]] = SbtMultiJvm.multiJvmSettings ++ Seq(
   parallelExecution in Test := false,
-  MultiJvmKeys.jvmOptions in MultiJvm := defaultMultiJvmOptions,
+  MultiJvmKeys.jvmOptions in MultiJvm := databasePortSetting :: defaultMultiJvmOptions,
   // make sure that MultiJvm test are compiled by the default test compilation
   compile in MultiJvm <<= (compile in MultiJvm) triggeredBy (compile in Test),
   // tag MultiJvm tests so that we can use concurrentRestrictions to disable parallel tests
@@ -190,7 +209,14 @@ val apiProjects = Seq[ProjectReference](
   client,
   cluster,
   pubsub,
+  broker,
+  `kafka-client`,
+  `kafka-broker`,
   persistence,
+  `persistence-javadsl`,
+  `persistence-scaladsl`,
+  `persistence-cassandra`,
+  `persistence-jdbc`,
   testkit,
   logback,
   immutables,
@@ -246,7 +272,7 @@ lazy val immutables = (project in file("immutables"))
   .settings(runtimeLibCommon: _*)
   .enablePlugins(RuntimeLibPlugins)
   .settings(
-    libraryDependencies += "org.immutables" % "value" % "2.1.3"
+    libraryDependencies += "org.immutables" % "value" % "2.3.2"
   )
 
 lazy val spi = (project in file("spi"))
@@ -307,7 +333,7 @@ lazy val `integration-client` = (project in file("integration-client"))
   .settings(name := "lagom-javadsl-integration-client")
   .settings(runtimeLibCommon: _*)
   .enablePlugins(RuntimeLibPlugins)
-  .dependsOn(client, `service-registry-client`)
+  .dependsOn(client, `service-registry-client`, `kafka-client`)
 
 lazy val server = (project in file("server"))
   .settings(
@@ -331,10 +357,11 @@ lazy val testkit = (project in file("testkit"))
       "com.typesafe.play" %% "play-netty-server" % PlayVersion,
       "org.apache.cassandra" % "cassandra-all" % CassandraAllVersion exclude("io.netty", "netty-all"),
       "com.typesafe.akka" %% "akka-stream-testkit" % AkkaVersion,
+      "com.typesafe.akka" %% "akka-persistence-cassandra" % AkkaPersistenceCassandraVersion,
       scalaTest % Test
     )
   )
-  .dependsOn(server, pubsub, persistence % "compile;test->test") 
+  .dependsOn(server, pubsub, broker, persistence % "compile;test->test", `persistence-cassandra` % "test->test")
 
 lazy val `service-integration-tests` = (project in file("service-integration-tests"))
   .settings(name := "lagom-service-integration-tests")
@@ -350,7 +377,7 @@ lazy val `service-integration-tests` = (project in file("service-integration-tes
     PgpKeys.publishSigned := {},
     publish := {}
   )
-  .dependsOn(server, persistence, pubsub, testkit, logback, `integration-client`)
+  .dependsOn(server, `persistence-cassandra`, pubsub, testkit, logback, `integration-client`)
 
 // for forked tests, necessary for Cassandra
 def forkedTests: Seq[Setting[_]] = Seq(
@@ -384,7 +411,7 @@ lazy val cluster = (project in file("cluster"))
       "com.typesafe.akka" %% "akka-cluster" % AkkaVersion,
       "com.typesafe.akka" %% "akka-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-multi-node-testkit" % AkkaVersion % "test",
-      "org.scala-lang.modules" %% "scala-java8-compat" % "0.7.0",
+      scalaJava8Compat,
       scalaTest % Test,
       "com.novocode" % "junit-interface" % "0.11" % "test",
       "com.google.inject" % "guice" % "4.0"
@@ -399,43 +426,112 @@ lazy val pubsub = (project in file("pubsub"))
   .enablePlugins(RuntimeLibPlugins)
   .settings(
     libraryDependencies ++= Seq(
+      "com.google.inject" % "guice" % "4.0",
       "com.typesafe.akka" %% "akka-cluster-tools" % AkkaVersion,
+      scalaJava8Compat,
       "com.typesafe.akka" %% "akka-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-multi-node-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-stream-testkit" % AkkaVersion % "test",
-      "org.scala-lang.modules" %% "scala-java8-compat" % "0.7.0",
       scalaTest % Test,
-      "com.novocode" % "junit-interface" % "0.11" % "test",
-      "com.google.inject" % "guice" % "4.0"
+      "com.novocode" % "junit-interface" % "0.11" % "test"
     )
   ) configs (MultiJvm)  
 
-lazy val persistence = (project in file("persistence"))
-  .settings(name := "lagom-javadsl-persistence")
+lazy val persistence = (project in file("persistence/core"))
+  .settings(name := "lagom-persistence")
   .dependsOn(cluster)
   .settings(runtimeLibCommon: _*)
-  .settings(multiJvmTestSettings: _*)
   .settings(Protobuf.settings)
   .enablePlugins(RuntimeLibPlugins)
-  .settings(forkedTests: _*)
   .settings(
     libraryDependencies ++= Seq(
+      "com.google.inject" % "guice" % "4.0",
+      scalaJava8Compat,
       "com.typesafe.akka" %% "akka-persistence" % AkkaVersion,
       "com.typesafe.akka" %% "akka-persistence-query-experimental" % AkkaVersion,
       "com.typesafe.akka" %% "akka-cluster-sharding" % AkkaVersion,
       "com.typesafe.akka" %% "akka-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-multi-node-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-stream-testkit" % AkkaVersion % "test",
+      scalaTest % Test,
+      "com.novocode" % "junit-interface" % "0.11" % "test"
+    )
+  )
+
+lazy val `persistence-javadsl` = (project in file("persistence/javadsl"))
+  .settings(name := "lagom-javadsl-persistence")
+  .dependsOn(persistence % "compile;test->test")
+  .settings(runtimeLibCommon: _*)
+  .settings(Protobuf.settings)
+  .enablePlugins(RuntimeLibPlugins)
+
+lazy val `persistence-scaladsl` = (project in file("persistence/scaladsl"))
+  .settings(name := "lagom-scaladsl-persistence")
+  .dependsOn(persistence % "compile;test->test")
+  .settings(runtimeLibCommon: _*)
+  .settings(Protobuf.settings)
+  .enablePlugins(RuntimeLibPlugins)
+
+lazy val `persistence-cassandra` = (project in file("persistence-cassandra"))
+  .settings(name := "lagom-javadsl-persistence-cassandra")
+  .dependsOn(persistence % "compile;test->test", `persistence-javadsl` % "compile;test->test")
+  .settings(runtimeLibCommon: _*)
+  .settings(multiJvmTestSettings: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(forkedTests: _*)
+  .settings(
+    libraryDependencies ++= Seq(
       "com.typesafe.akka" %% "akka-persistence-cassandra" % AkkaPersistenceCassandraVersion,
       "org.apache.cassandra" % "cassandra-all" % CassandraAllVersion % "test" exclude("io.netty", "netty-all"),
-      "io.netty" % "netty-codec-http" % "4.0.33.Final" % "test",
-      "io.netty" % "netty-transport-native-epoll" % "4.0.33.Final" % "test" classifier "linux-x86_64",
-      "org.scala-lang.modules" %% "scala-java8-compat" % "0.7.0",
-      scalaTest % Test,
-      "com.novocode" % "junit-interface" % "0.11" % "test",
-      "com.google.inject" % "guice" % "4.0"
+      "io.netty" % "netty-codec-http" % NettyVersion % "test",
+      "io.netty" % "netty-transport-native-epoll" % NettyVersion % "test" classifier "linux-x86_64"
     )
-  ) configs (MultiJvm)  
+  ) configs (MultiJvm)
+
+lazy val `persistence-jdbc` = (project in file("persistence-jdbc"))
+  .settings(name := "lagom-javadsl-persistence-jdbc")
+  .dependsOn(persistence % "compile;test->test", `persistence-javadsl` % "compile;test->test")
+  .settings(runtimeLibCommon: _*)
+  .settings(multiJvmTestSettings: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(forkedTests: _*)
+  .settings(
+    libraryDependencies ++= Seq(
+      "com.github.dnvriend" %% "akka-persistence-jdbc" % "2.6.7",
+      "com.typesafe.play" %% "play-jdbc" % PlayVersion
+    )
+  ) configs (MultiJvm)
+
+lazy val `kafka-client` = (project in file("kafka-client"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-javadsl-kafka-client")
+  .settings(runtimeLibCommon: _*)
+  .settings(
+    libraryDependencies ++= Seq(
+      "org.slf4j" % "log4j-over-slf4j" % "1.7.21",
+      "com.typesafe.akka" %% "akka-stream-kafka" % AkkaStreamKafka exclude("org.slf4j","slf4j-log4j12"),
+      "org.apache.kafka" %% "kafka" % KafkaVersion exclude("org.slf4j","slf4j-log4j12") exclude("javax.jms", "jms") exclude("com.sun.jdmk", "jmxtools") exclude("com.sun.jmx", "jmxri"),
+      scalaTest % Test
+    )
+  )
+  .dependsOn(api)
+
+lazy val broker = (project in file("broker"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-javadsl-broker")
+  .settings(runtimeLibCommon: _*)
+  .dependsOn(api, `persistence-javadsl`)
+
+lazy val `kafka-broker` = (project in file("kafka-broker"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-javadsl-kafka-broker")
+  .settings(runtimeLibCommon: _*)
+  .settings(
+    libraryDependencies ++= Seq(
+      scalaTest % Test
+    )
+  )
+  .dependsOn(`kafka-client`, broker, client % "optional", `kafka-server` % Test, logback % Test, server)
 
 lazy val logback = (project in file("logback"))
   .enablePlugins(RuntimeLibPlugins)
@@ -454,7 +550,7 @@ lazy val `dev-environment` = (project in file("dev"))
   .enablePlugins(AutomateHeaderPlugin)
   .aggregate(`build-link`, `reloadable-server`, `build-tool-support`, `sbt-plugin`, `maven-plugin`, `service-locator`,
     `service-registration`, `cassandra-server`, `cassandra-registration`,  `play-integration`, `service-registry-client`,
-    `maven-java-archetype`)
+    `maven-java-archetype`, `kafka-server`)
   .settings(
     publish := {},
     PgpKeys.publishSigned := {}
@@ -513,6 +609,7 @@ lazy val `sbt-plugin` = (project in file("dev") / "sbt-plugin")
     ),
     addSbtPlugin(("com.typesafe.play" % "sbt-plugin" % PlayVersion).exclude("org.slf4j","slf4j-simple")),
     scriptedDependencies := {
+      val () = scriptedDependencies.value
       val () = publishLocal.value
       val () = (publishLocal in `service-locator`).value
       val () = (publishLocal in LocalProject("sbt-scripted-tools")).value
@@ -577,13 +674,53 @@ lazy val `maven-launcher` = (project in file("dev") / "maven-launcher")
 def scriptedSettings: Seq[Setting[_]] = ScriptedPlugin.scriptedSettings ++ 
   Seq(scriptedLaunchOpts <+= version apply { v => s"-Dproject.version=$v" }) ++
   Seq(
-    scripted <<= ScriptedPlugin.scripted.tag(Tags.Test),
+    scriptedDependencies := {
+      startTick()
+      scriptedDependencies.value
+    },
+    scripted := {
+      // this actually get executed *after* scripted is evaluated, since the macro rewrites the below
+      // to be a dependency.
+      stopTick()
+      scripted.evaluated
+    },
+    scripted <<= scripted.tag(Tags.Test),
     scriptedLaunchOpts ++= Seq(
       "-Xmx768m",
       "-XX:MaxMetaspaceSize=384m",
       "-Dscala.version=" + sys.props.get("scripted.scala.version").getOrElse((scalaVersion in `reloadable-server`).value)
     )
   )
+
+// This outputs a tick tock every minute to ensure travis doesn't decide that the build is frozen
+// during scripted tests
+val timer = new Timer("scripted-tick-timer", true)
+val task = new AtomicReference[TimerTask]()
+val ticks = new AtomicInteger()
+
+def startTick(): Unit = synchronized {
+  if (ticks.getAndIncrement() == 0) {
+    val t = new TimerTask {
+      var tick = true
+      override def run(): Unit = {
+        if (tick) {
+          println("tick")
+        } else {
+          println("tock")
+        }
+        tick = !tick
+      }
+    }
+    task.set(t)
+    timer.schedule(t, 60000, 60000)
+  }
+}
+
+def stopTick(): Unit = synchronized {
+  if (ticks.decrementAndGet() == 0) {
+    task.get().cancel()
+  }
+}
 
 def archetypeProject(archetypeName: String) =
   Project(s"maven-$archetypeName-archetype", file("dev") / "archetypes" / s"maven-$archetypeName")
@@ -630,6 +767,9 @@ lazy val `service-locator` = (project in file("dev") / "service-locator")
       // Explicit akka dependency because maven chooses the wrong version
       "com.typesafe.akka" %% "akka-actor" % AkkaVersion,
       "com.typesafe.play" %% "play-netty-server" % PlayVersion,
+      // Need to upgrade Netty due to encountering this deadlock in the service gateway
+      // https://github.com/netty/netty/pull/5110
+      "io.netty" % "netty-codec-http" % NettyVersion,
       scalaTest % Test
     )
   )
@@ -651,7 +791,7 @@ lazy val `cassandra-registration` = (project in file("dev") / "cassandra-registr
   .settings(name := "lagom-cassandra-registration")
   .settings(runtimeLibCommon: _*)
   .enablePlugins(RuntimeLibPlugins)
-  .dependsOn(api, persistence, `service-registry-client`)
+  .dependsOn(api, `persistence-cassandra`, `service-registry-client`)
 
 lazy val `play-integration` = (project in file("dev") / "play-integration")
   .settings(name := "lagom-play-integration")
@@ -674,5 +814,30 @@ lazy val `cassandra-server` = (project in file("dev") / "cassandra-server")
         exclude("io.netty", "netty-all") exclude("io.netty", "netty-handler") exclude("io.netty", "netty-buffer")
         exclude("io.netty", "netty-common") exclude("io.netty", "netty-transport") exclude("io.netty", "netty-codec"),
       "org.apache.cassandra" % "cassandra-all" % CassandraAllVersion
+    )
+  )
+
+lazy val `kafka-server` = (project in file("dev") / "kafka-server")
+  .settings(name := "lagom-kafka-server")
+  .settings(runtimeLibCommon: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(
+    libraryDependencies ++= Seq(
+      "org.apache.kafka" %% "kafka" % KafkaVersion,
+      // log4j version prior to 1.2.17 required javax.jms, and that artifact could not properly resolved when using maven
+      // without adding a resolver. The problem doesn't appear with sbt because the log4j version brought by both zookeeper 
+      // and curator dependencies are evicted to version 1.2.17. Unfortunately, because of how maven resolution works, we 
+      // have to explicitly add the desired log4j version we want to use here.
+      // By the way, log4j 1.2.17 and later resolve the javax.jms dependency issue by using geronimo-jms. See 
+      // http://stackoverflow.com/questions/4908651/the-following-artifacts-could-not-be-resolved-javax-jmsjmsjar1-1 
+      // for more context. 
+      log4J,
+      // Note that curator 3.x is only compatible with zookeper 3.5.x. Kafka currently uses zookeeper 3.4, hence we have 
+      // to use curator 2.x, which is compatible with zookeeper 3.4 (see the notice in
+      // http://curator.apache.org/index.html - make sure to scroll to the bottom)
+      "org.apache.curator" % "curator-framework" % "2.10.0",
+      "org.apache.curator" % "curator-test" % "2.10.0",
+      scalaJava8Compat,
+      scalaTest % Test
     )
   )

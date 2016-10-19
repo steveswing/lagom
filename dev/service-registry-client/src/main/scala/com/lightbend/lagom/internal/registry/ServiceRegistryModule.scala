@@ -11,6 +11,7 @@ import javax.inject.{ Inject, Provider, Singleton }
 
 import akka.stream.Materializer
 import com.google.inject.AbstractModule
+import com.lightbend.lagom.internal.api.broker.NoTopicFactoryProvider
 import com.lightbend.lagom.internal.client._
 import com.lightbend.lagom.javadsl.api.Descriptor.Call
 import com.lightbend.lagom.javadsl.api.transport.NotFound
@@ -71,7 +72,8 @@ class ServiceRegistryClientProvider extends Provider[ServiceRegistry] {
 
   lazy val get = {
     val serviceLocator = new ClientServiceLocator(config)
-    val implementor = new ServiceClientImplementor(ws, webSocketClient, serviceInfo, serviceLocator, environment)(ec, mat)
+    val implementor = new ServiceClientImplementor(ws, webSocketClient, serviceInfo, serviceLocator, environment,
+      NoTopicFactoryProvider)(ec, mat)
     val loader = new ServiceClientLoader(jacksonSerializerFactory, jacksonExceptionSerializer, environment, implementor)
     loader.loadServiceClient(classOf[ServiceRegistry])
   }
@@ -155,9 +157,9 @@ object ServiceRegistryServiceLocator {
 class NoServiceLocator extends ServiceLocator {
   import java.util.concurrent.CompletableFuture
 
-  override def locate(name: String, serviceCall: Call[_, _]): CompletionStage[Optional[URI]] = ???
-  CompletableFuture.completedFuture(Optional.empty())
+  override def locate(name: String, serviceCall: Call[_, _]): CompletionStage[Optional[URI]] =
+    CompletableFuture.completedFuture(Optional.empty())
 
-  override def doWithService[T](name: String, serviceCall: Call[_, _], block: JFunction[URI, CompletionStage[T]]): CompletionStage[Optional[T]] = ???
-  CompletableFuture.completedFuture(Optional.empty())
+  override def doWithService[T](name: String, serviceCall: Call[_, _], block: JFunction[URI, CompletionStage[T]]): CompletionStage[Optional[T]] =
+    CompletableFuture.completedFuture(Optional.empty())
 }

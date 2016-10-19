@@ -5,48 +5,54 @@ package com.lightbend.lagom.internal.client
 
 import java.lang.reflect.{ InvocationHandler, Method }
 import java.net.{ URI, URLEncoder }
-import java.util.function.BiFunction
 import java.util.{ Optional, function }
 import java.util.concurrent.CompletionStage
-import javax.inject.{ Inject, Singleton }
-
-import akka.stream.Materializer
-import akka.stream.javadsl.{ Source => JSource }
-import akka.stream.scaladsl.{ Sink, Source }
-import akka.util.ByteString
-import com.lightbend.lagom.internal.api.{ MethodServiceCallHolder, Path }
-import akka.NotUsed
-import com.lightbend.lagom.javadsl.api.Descriptor.{ Call, RestCallId }
-import com.lightbend.lagom.javadsl.api.deser.MessageSerializer.NegotiatedSerializer
-import com.lightbend.lagom.javadsl.api.deser._
-import com.lightbend.lagom.javadsl.api.security.ServicePrincipal
-import com.lightbend.lagom.javadsl.api.transport._
-import com.lightbend.lagom.javadsl.api.{ Descriptor, ServiceCall, ServiceInfo, ServiceLocator }
-import io.netty.handler.codec.http.websocketx.WebSocketVersion
-import org.pcollections.{ HashTreePMap, PSequence, TreePVector }
-import play.api.Environment
-import play.api.http.HeaderNames
-import play.api.libs.streams.AkkaStreams
-import play.api.libs.ws.{ InMemoryBody, WSClient }
+import java.util.function.BiFunction
 
 import scala.collection.JavaConverters._
 import scala.compat.java8.FutureConverters._
 import scala.compat.java8.OptionConverters._
 import scala.concurrent.{ ExecutionContext, Future }
+import org.pcollections.{ HashTreePMap, PSequence, TreePVector }
+import org.slf4j.LoggerFactory
+import com.google.inject.Inject
+import com.lightbend.lagom.internal.api.{ MethodServiceCallHolder, MethodTopicHolder, Path }
+import com.lightbend.lagom.internal.api.broker.TopicFactoryProvider
+import com.lightbend.lagom.javadsl.api.{ Descriptor, ServiceCall, ServiceInfo, ServiceLocator }
+import com.lightbend.lagom.javadsl.api.Descriptor.{ Call, RestCallId }
+import com.lightbend.lagom.javadsl.api.broker.Topic
+import com.lightbend.lagom.javadsl.api.deser._
+import com.lightbend.lagom.javadsl.api.security.ServicePrincipal
+import com.lightbend.lagom.javadsl.api.transport._
+import akka.NotUsed
+import akka.stream.Materializer
+import akka.stream.javadsl.{ Source => JSource }
+import akka.stream.scaladsl.{ Sink, Source }
+import akka.util.ByteString
+import io.netty.handler.codec.http.websocketx.WebSocketVersion
+import javax.inject.Singleton
+
+import play.api.Environment
+import play.api.http.HeaderNames
+import play.api.libs.streams.AkkaStreams
+import play.api.libs.ws.{ InMemoryBody, WSClient }
 
 /**
  * Implements a service client.
  */
 @Singleton
 class ServiceClientImplementor @Inject() (ws: WSClient, webSocketClient: WebSocketClient, serviceInfo: ServiceInfo,
-                                          serviceLocator: ServiceLocator, environment: Environment)(implicit ec: ExecutionContext, mat: Materializer) {
+                                          serviceLocator: ServiceLocator, environment: Environment,
+                                          topicFactoryProvider: TopicFactoryProvider)(implicit ec: ExecutionContext, mat: Materializer) {
+
+  private val log = LoggerFactory.getLogger(classOf[ServiceClientImplementor])
 
   def implement[T](interface: Class[T], descriptor: Descriptor): T = {
     java.lang.reflect.Proxy.newProxyInstance(environment.classLoader, Array(interface), new ServiceClientInvocationHandler(descriptor)).asInstanceOf[T]
   }
 
   class ServiceClientInvocationHandler(descriptor: Descriptor) extends InvocationHandler {
-    private val methods: Map[Method, ServiceCallInvocationHandler[Any, Any]] = descriptor.calls().asScala.map { call =>
+    private def serviceCallMethods: Map[Method, ServiceCallInvocationHandler[Any, Any]] = descriptor.calls().asScala.map { call =>
       call.serviceCallHolder() match {
         case holder: MethodServiceCallHolder =>
           holder.method -> new ServiceCallInvocationHandler[Any, Any](ws, webSocketClient, serviceInfo, serviceLocator,
@@ -54,10 +60,27 @@ class ServiceClientImplementor @Inject() (ws: WSClient, webSocketClient: WebSock
       }
     }.toMap
 
+    private def topicMethods: Map[Method, _] = {
+      descriptor.topicCalls.asScala.map { topicCall =>
+        topicCall.topicHolder match {
+          case holder: MethodTopicHolder =>
+            topicFactoryProvider.get match {
+              case Some(topicFactory) =>
+                holder.method -> topicFactory.create(topicCall)
+              case None => holder.method -> NoTopicFactory
+            }
+        }
+      }.toMap
+    }
+
+    private val methods: Map[Method, _] = serviceCallMethods ++ topicMethods
+
     override def invoke(proxy: scala.Any, method: Method, args: Array[AnyRef]): AnyRef = {
       methods.get(method) match {
-        case Some(serviceCallInvocationHandler) => serviceCallInvocationHandler.invoke(args)
-        case None                               => throw new IllegalStateException("Method " + method + " is not described by the service client descriptor")
+        case Some(serviceCallInvocationHandler: ServiceCallInvocationHandler[_, _]) => serviceCallInvocationHandler.invoke(args)
+        case Some(topic: Topic[_]) => topic
+        case Some(NoTopicFactory) => throw new IllegalStateException("Attempt to get a topic, but there is no TopicFactory provided to implement it. You may need to add a dependency on lagom-javadsl-kafka-broker to your projects dependencies.")
+        case _ => throw new IllegalStateException("Method " + method + " is not described by the service client descriptor")
       }
     }
   }
@@ -248,7 +271,7 @@ private class ClientServiceCallInvoker[Request, Response](
     responseHeader -> deserializer.deserialize(response.asJava).asInstanceOf[Response]
   }
 
-  private def doMakeStreamedCall(requestStream: Source[ByteString, _], requestSerializer: NegotiatedSerializer[_, _],
+  private def doMakeStreamedCall(requestStream: Source[ByteString, _], requestSerializer: MessageSerializer.NegotiatedSerializer[_, _],
                                  requestHeader: RequestHeader): Future[(ResponseHeader, Source[ByteString, _])] = {
     webSocketClient.connect(descriptor.exceptionSerializer, WebSocketVersion.V13, requestHeader,
       requestStream)
@@ -259,33 +282,35 @@ private class ClientServiceCallInvoker[Request, Response](
    */
   private def makeStrictCall(requestHeader: RequestHeader, requestSerializer: StrictMessageSerializer[Request], responseSerializer: StrictMessageSerializer[Response],
                              request: Request): Future[(ResponseHeader, Response)] = {
-    val serializer = requestSerializer.serializerForRequest()
-    val body = serializer.serialize(request)
+    val requestHolder = ws.url(requestHeader.uri.toString)
+      .withMethod(requestHeader.method.name)
+
+    val requestWithBody =
+      if (requestSerializer.isUsed) {
+        val serializer = requestSerializer.serializerForRequest()
+        val body = serializer.serialize(request)
+
+        requestHolder.withBody(InMemoryBody(body))
+      } else requestHolder
 
     val transportRequestHeader = descriptor.headerFilter.transformClientRequest(requestHeader)
 
-    val requestHolder = ws.url(requestHeader.uri.toString)
-      .withMethod(requestHeader.method.name)
-      .withHeaders(transportRequestHeader.headers.asScala.toSeq.map {
-        case (name, values) => name -> values.asScala.mkString(", ")
-      }: _*)
-
-    val requestWithBody = if (requestSerializer.isUsed) {
-      val contentType = transportRequestHeader.protocol.toContentTypeHeader.get
-      requestHolder.withBody(InMemoryBody(body))
-        .withHeaders(HeaderNames.CONTENT_TYPE -> contentType)
-    } else requestHolder
-
-    val accept = transportRequestHeader.acceptedResponseProtocols.asScala.flatMap { accept =>
-      accept.toContentTypeHeader.asScala
-    }.mkString(", ")
-    val acceptHeader = if (accept.nonEmpty) {
-      Seq(HeaderNames.ACCEPT -> accept)
-    } else {
-      Nil
+    val requestHeaders = transportRequestHeader.headers.asScala.toSeq.map {
+      case (name, values) => name -> values.asScala.mkString(", ")
     }
 
-    requestWithBody.withHeaders(acceptHeader: _*).execute().map { response =>
+    val contentTypeHeader =
+      transportRequestHeader.protocol.toContentTypeHeader.asScala.toSeq.map(HeaderNames.CONTENT_TYPE -> _)
+
+    val acceptHeader = {
+      val accept = transportRequestHeader.acceptedResponseProtocols.asScala.flatMap { accept =>
+        accept.toContentTypeHeader.asScala
+      }.mkString(", ")
+      if (accept.nonEmpty) Seq(HeaderNames.ACCEPT -> accept)
+      else Nil
+    }
+
+    requestWithBody.withHeaders(requestHeaders ++ contentTypeHeader ++ acceptHeader: _*).execute().map { response =>
 
       // Create the message header
       val protocol = MessageProtocol.fromContentTypeHeader(response.header(HeaderNames.CONTENT_TYPE).asJava)
@@ -307,3 +332,5 @@ private class ClientServiceCallInvoker[Request, Response](
   }
 
 }
+
+case object NoTopicFactory

@@ -5,13 +5,14 @@ package com.lightbend.lagom.javadsl.testkit
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
-import com.lightbend.lagom.javadsl.persistence.PersistenceSpec
 import com.lightbend.lagom.javadsl.persistence.TestEntity
 import akka.testkit.TestProbe
-import com.lightbend.lagom.internal.persistence.PersistentEntityActor
+import com.lightbend.lagom.internal.javadsl.persistence.PersistentEntityActor
 import java.util.Optional
 
-class PersistentEntityTestDriverCompatSpec extends PersistenceSpec {
+import com.lightbend.lagom.javadsl.persistence.cassandra.CassandraPersistenceSpec
+
+class PersistentEntityTestDriverCompatSpec extends CassandraPersistenceSpec {
 
   "PersistentEntityActor and PersistentEntityTestDriver" must {
     "produce same events and state" in {
@@ -41,7 +42,8 @@ class PersistentEntityTestDriverCompatSpec extends PersistenceSpec {
       }
       val replies = receiveN(replySideEffects.size)
       replySideEffects should be(replies)
-      outcome.events.asScala should be(replies.collect { case evt: TestEntity.Evt => evt })
+      // Add 2 generates 2 events, but only one reply so drop last event when comparing
+      outcome.events.asScala.dropRight(1) should be(replies.collect { case evt: TestEntity.Evt => evt })
 
       outcome.state should be(replies.last)
 
