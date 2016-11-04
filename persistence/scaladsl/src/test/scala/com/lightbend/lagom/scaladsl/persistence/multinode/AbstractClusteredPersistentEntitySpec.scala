@@ -3,23 +3,21 @@
  */
 package com.lightbend.lagom.scaladsl.persistence.multinode
 
-import akka.actor.{ ActorRef, ActorSystem, Address }
+import scala.collection.JavaConverters._
+import scala.compat.java8.FutureConverters._
+import scala.concurrent.Await
+import scala.concurrent.Future
+import scala.concurrent.duration._
+
+import akka.actor.{ ActorRef, Address }
 import akka.cluster.{ Cluster, MemberStatus }
+import akka.pattern.pipe
 import akka.remote.testconductor.RoleName
 import akka.remote.testkit.{ MultiNodeConfig, MultiNodeSpec }
 import akka.testkit.ImplicitSender
 import com.lightbend.lagom.scaladsl.persistence._
 import com.typesafe.config.{ Config, ConfigFactory }
-import play.api.inject.guice.GuiceApplicationBuilder
-import play.api.{ Application, Configuration, Environment }
-import akka.pattern.pipe
-
-import scala.concurrent.Await
-import scala.concurrent.duration._
-import scala.compat.java8.FutureConverters._
-import scala.collection.JavaConverters._
-import play.api.inject.bind
-import scala.concurrent.Future
+import play.api.Environment
 
 abstract class AbstractClusteredPersistentEntityConfig extends MultiNodeConfig {
   val node1 = role("node1")
@@ -83,8 +81,9 @@ abstract class AbstractClusteredPersistentEntitySpec(config: AbstractClusteredPe
     else ref.path.address
 
   override protected def atStartup() {
-    // Initialize read side
-    readSide
+    // Initialize components
+    registry.register(new TestEntity(system))
+    components.readSide.register(readSideProcessor())
 
     roles.foreach(n => join(n, node1))
     within(15.seconds) {
@@ -95,32 +94,11 @@ abstract class AbstractClusteredPersistentEntitySpec(config: AbstractClusteredPe
     enterBarrier("startup")
   }
 
-  override protected def afterTermination(): Unit = {
-    injector.instanceOf[Application].stop()
-  }
+  def components: PersistenceComponents
 
-  lazy val injector = {
-    val configuration = Configuration(system.settings.config)
-    new GuiceApplicationBuilder()
-      .loadConfig(configuration)
-      .overrides(bind[ActorSystem].toInstance(system))
-      .build().injector
-  }
+  def registry: PersistentEntityRegistry = components.persistentEntityRegistry
 
-  lazy val registry: PersistentEntityRegistry = {
-    val reg = injector.instanceOf[PersistentEntityRegistry]
-    reg.register(classOf[TestEntity])
-    reg
-  }
-
-  protected def readSideProcessor: Class[_ <: ReadSideProcessor[TestEntity.Evt]]
-
-  // lazy because we don't want to create it until after database is started
-  lazy val readSide: ReadSide = {
-    val rs = injector.instanceOf[ReadSide]
-    rs.register(readSideProcessor)
-    rs
-  }
+  protected def readSideProcessor: () => ReadSideProcessor[TestEntity.Evt]
 
   protected def getAppendCount(id: String): Future[Long]
 
@@ -142,7 +120,7 @@ abstract class AbstractClusteredPersistentEntitySpec(config: AbstractClusteredPe
       val ref1 = registry.refFor(classOf[TestEntity], "1").withAskTimeout(remaining)
 
       // note that this is done on both node1 and node2
-      val r1: Future[TestEntity.Evt] = ref1.ask(TestEntity.Add("a"))
+      val r1 = ref1.ask(TestEntity.Add("a"))
       r1.pipeTo(testActor)
       expectMsg(TestEntity.Appended("A"))
       enterBarrier("appended-A")
@@ -180,7 +158,8 @@ abstract class AbstractClusteredPersistentEntitySpec(config: AbstractClusteredPe
 
       val entities = for (n <- 10 to 29) yield registry.refFor(classOf[TestEntity], n.toString)
       val addresses = entities.map { ent =>
-        val r: Future[Address] = ent.ask(TestEntity.GetAddress)
+        val r = ent.ask(TestEntity.GetAddress)
+        val h: Future[String] = r.map(_.hostPort) // compile check that the reply type is inferred correctly
         r.pipeTo(testActor)
         expectMsgType[Address]
       }.toSet

@@ -1,6 +1,6 @@
 
 val PlayVersion = "2.5.0"
-val AkkaVersion = "2.4.4"
+val AkkaVersion = "2.4.11"
 
 val branch = {
   val rev = "git rev-parse --abbrev-ref HEAD".!!.trim
@@ -64,7 +64,7 @@ lazy val parentDir = Path.fileProperty("user.dir").getParentFile
 
 // Depend on the integration tests, they should bring everything else in
 lazy val serviceIntegrationTests = ProjectRef(parentDir, "integration-tests-javadsl")
-lazy val persistenceJdbc = ProjectRef(parentDir, "persistence-jdbc")
+lazy val persistenceJdbc = ProjectRef(parentDir, "persistence-jdbc-javadsl")
 lazy val kafkaBroker = ProjectRef(parentDir, "kafka-broker")
 
 // Needed to compile test classes using immutables annotation

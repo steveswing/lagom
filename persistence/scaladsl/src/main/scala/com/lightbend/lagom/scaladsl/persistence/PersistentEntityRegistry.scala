@@ -3,13 +3,12 @@
  */
 package com.lightbend.lagom.scaladsl.persistence
 
-import java.util.UUID
-
-import scala.concurrent.duration._
+import akka.{ Done, NotUsed }
 import akka.stream.scaladsl
-import akka.NotUsed
-import akka.Done
+
 import scala.concurrent.Future
+import scala.concurrent.duration._
+import scala.reflect.ClassTag
 
 /**
  * At system startup all [[PersistentEntity]] classes must be registered here
@@ -25,8 +24,12 @@ trait PersistentEntityRegistry {
   /**
    * At system startup all [[com.lightbend.lagom.scaladsl.persistence.PersistentEntity]]
    * classes must be registered with this method.
+   *
+   * The `entityFactory` will be called when a new entity instance is to be created.
+   * That will happen in another thread, so the `entityFactory` must be thread-safe, e.g.
+   * not close over shared mutable state that is not thread-safe.
    */
-  def register[C, E, S](entityClass: Class[_ <: PersistentEntity[C, E, S]]): Unit
+  def register(entityFactory: => PersistentEntity[_, _, _]): Unit
 
   /**
    * Retrieve a [[com.lightbend.lagom.scaladsl.persistence.PersistentEntityRef]] for a
@@ -50,7 +53,7 @@ trait PersistentEntityRegistry {
   def eventStream[Event <: AggregateEvent[Event]](
     aggregateTag: AggregateEventTag[Event],
     fromOffset:   Offset
-  ): scaladsl.Source[(Event, Offset), NotUsed]
+  ): scaladsl.Source[EventStreamElement[Event], NotUsed]
 
   /**
    * Gracefully stop the persistent entities and leave the cluster.

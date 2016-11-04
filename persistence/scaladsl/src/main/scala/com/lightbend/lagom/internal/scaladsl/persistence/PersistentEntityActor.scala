@@ -3,61 +3,84 @@
  */
 package com.lightbend.lagom.internal.scaladsl.persistence
 
-import scala.util.control.Exception.Catcher
 import java.net.URLDecoder
 
-import scala.util.control.NonFatal
-import akka.actor.ActorRef
-import akka.actor.Props
-import akka.persistence.PersistentActor
-import akka.persistence.RecoveryCompleted
-import akka.persistence.SnapshotOffer
-import akka.util.ByteString
-
-import scala.concurrent.duration.FiniteDuration
-import akka.actor.ReceiveTimeout
+import akka.actor.{ Props, ReceiveTimeout }
 import akka.cluster.sharding.ShardRegion
-import com.lightbend.lagom.scaladsl.persistence.{ AggregateEvent, AggregateEventShards, AggregateEventTag, PersistentEntity }
-import com.lightbend.lagom.scaladsl.persistence.PersistentEntity.ReplyType
-
+import akka.persistence.{ PersistentActor, RecoveryCompleted, SnapshotOffer }
 import akka.persistence.journal.Tagged
+import akka.util.ByteString
+import com.lightbend.lagom.scaladsl.persistence.{ AggregateEvent, AggregateEventShards, AggregateEventTag, PersistentEntity }
 import play.api.Logger
 
+import scala.concurrent.duration.FiniteDuration
+import scala.util.control.Exception.Catcher
+import scala.util.control.NonFatal
+
 private[lagom] object PersistentEntityActor {
-  def props[C, E, S](
+  def props(
     persistenceIdPrefix:       String,
     entityId:                  Option[String],
-    entityFactory:             () => PersistentEntity[C, E, S],
+    entityFactory:             () => PersistentEntity[_, _, _],
     snapshotAfter:             Option[Int],
     passivateAfterIdleTimeout: FiniteDuration
   ): Props =
-    Props(new PersistentEntityActor(persistenceIdPrefix, entityId, entityFactory(), snapshotAfter.getOrElse(0),
-      passivateAfterIdleTimeout))
+    Props(new PersistentEntityActor(persistenceIdPrefix, entityId,
+      entityFactory().asInstanceOf[PersistentEntity[Any, Any, Any]],
+      snapshotAfter.getOrElse(0), passivateAfterIdleTimeout))
 
   /**
    * Stop the actor for passivation. `PoisonPill` does not work well
    * with persistent actors.
    */
   case object Stop
+
+  val EntityIdSeparator = '|'
+
+  /**
+   * @return the entity id part encoded in the persistence id
+   */
+  def extractEntityId(persistenceId: String): String = {
+    val idx = persistenceId.indexOf(EntityIdSeparator)
+    if (idx > 0) {
+      persistenceId.substring(idx + 1)
+    } else throw new IllegalArgumentException(
+      s"Cannot split '$persistenceId' into persistenceIdPrefix and entityId " +
+        s"because there is no separator character ('$EntityIdSeparator')"
+    )
+  }
+
 }
 
 /**
  * The `PersistentActor` that runs a [[com.lightbend.lagom.scaladsl.persistence.PersistentEntity]].
  */
-private[lagom] class PersistentEntityActor[C, E, S](
+private[lagom] class PersistentEntityActor(
   persistenceIdPrefix:       String,
   id:                        Option[String],
-  entity:                    PersistentEntity[C, E, S],
+  entity:                    PersistentEntity[Any, Any, Any],
   snapshotAfter:             Int,
   passivateAfterIdleTimeout: FiniteDuration
 ) extends PersistentActor {
+
+  import PersistentEntityActor.EntityIdSeparator
+
+  // we don't care about the types in the actor, but using these aliases for better readability
+  private type C = Any
+  private type E = Any
+  private type S = Any
+
   private val log = Logger(this.getClass)
 
   private val entityId: String = id.getOrElse(
     URLDecoder.decode(self.path.name, ByteString.UTF_8)
   )
+  require(
+    !persistenceIdPrefix.contains(EntityIdSeparator),
+    s"persistenceIdPrefix '$persistenceIdPrefix' contains '$EntityIdSeparator' which is a reserved character"
+  )
 
-  override val persistenceId: String = persistenceIdPrefix + entityId
+  override val persistenceId: String = persistenceIdPrefix + EntityIdSeparator + entityId
 
   entity.internalSetEntityId(entityId)
   private var state: S = entity.initialState
@@ -80,7 +103,7 @@ private[lagom] class PersistentEntityActor[C, E, S](
   }
 
   private val unhandledEvent: PartialFunction[(E, S), S] = {
-    case event =>
+    case (event, _) =>
       log.warn(s"Unhandled event [${event.getClass.getName}] in [${entity.getClass.getName}] with id [${entityId}]")
       state
   }
@@ -93,11 +116,11 @@ private[lagom] class PersistentEntityActor[C, E, S](
 
   private def applyEvent(event: E): Unit = {
     val actions = try behavior(state) catch unhandledState
-    actions.eventHandler.applyOrElse((event, state), unhandledEvent)
+    state = actions.eventHandler.applyOrElse((event, state), unhandledEvent)
   }
 
-  private def unhandledCommand: PartialFunction[(C, entity.CommandContext, S), entity.Persist[_]] = {
-    case cmd =>
+  private def unhandledCommand: PartialFunction[(C, entity.CommandContext[Any], S), entity.Persist[_]] = {
+    case (cmd, _, _) =>
       // not using akka.actor.Status.Failure because it is using Java serialization
       sender() ! PersistentEntity.UnhandledCommandException(
         s"Unhandled command [${cmd.getClass.getName}] in [${entity.getClass.getName}] with id [${entityId}]"
@@ -107,26 +130,23 @@ private[lagom] class PersistentEntityActor[C, E, S](
   }
 
   def receiveCommand: Receive = {
-    case cmd: PersistentEntity.ReplyType[_] =>
+    case cmd: PersistentEntity.ReplyType[Any] @unchecked =>
       val replyTo = sender()
-      val ctx = new entity.CommandContext {
-        def reply[R](currentCommand: C with ReplyType[R], msg: R): Unit = {
-          if (currentCommand ne cmd) throw new IllegalArgumentException(
-            "Reply must be sent in response to the command that is currently processed, " +
-              s"Received command is [$cmd], but reply was to [$currentCommand]"
-          )
-          replyTo.tell(msg, ActorRef.noSender)
-        }
+      val ctx = new entity.CommandContext[Any] {
+        override def reply(msg: Any): Unit = replyTo ! msg
 
         override def commandFailed(cause: Throwable): Unit =
           // not using akka.actor.Status.Failure because it is using Java serialization
-          replyTo.tell(cause, ActorRef.noSender)
+          replyTo ! cause
       }
 
       try {
         val actions = try behavior(state) catch unhandledState
-        val result = actions.commandHandler.applyOrElse((cmd.asInstanceOf[C], ctx, state), unhandledCommand)
-
+        val commandHandler = actions.commandHandlers.get(cmd.getClass) match {
+          case Some(h) => h
+          case None    => PartialFunction.empty
+        }
+        val result = commandHandler.applyOrElse((cmd, ctx, state), unhandledCommand)
         result match {
           case _: entity.PersistNone[_] => // done
           case entity.PersistOne(event, afterPersist) =>
@@ -184,6 +204,7 @@ private[lagom] class PersistentEntityActor[C, E, S](
   }
 
   private def tag(event: Any): Any = {
+    import scala.language.existentials
     event match {
       case a: AggregateEvent[_] ⇒
         val tag = a.aggregateTag match {

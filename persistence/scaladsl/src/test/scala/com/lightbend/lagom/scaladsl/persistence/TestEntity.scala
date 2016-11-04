@@ -9,21 +9,61 @@ import akka.actor.Address
 import akka.cluster.Cluster
 import com.lightbend.lagom.scaladsl.persistence.PersistentEntity.ReplyType
 import com.lightbend.lagom.scaladsl.persistence.testkit.SimulatedNullpointerException
-import javax.inject.Inject
+import com.lightbend.lagom.scaladsl.playjson.{ Jsonable, SerializerRegistry, Serializers }
 
+import play.api.libs.json.Json
+
+import scala.collection.immutable
+
+/**
+ * NOTE to use this the serialization registry needs to be registered in actor system config
+ * to be picked up like this:
+ *
+ * `lagom.serialization.play-json.serialization-registry =
+ *   "com.lightbend.lagom.scaladsl.persistence.TestEntitySerializerRegistry"`
+ */
 object TestEntity {
-  // FIXME try with Jsonable
-  sealed trait Cmd
+
+  object SharedFormats {
+    import play.api.libs.json._
+
+    implicit val modeFormat = Format[Mode](
+      Reads[Mode] {
+        case JsString("append")  => JsSuccess(Mode.Append)
+        case JsString("prepend") => JsSuccess(Mode.Prepend)
+        case js                  => JsError(s"unknown mode js: $js")
+      }, Writes[Mode] {
+        case Mode.Append  => JsString("append")
+        case Mode.Prepend => JsString("prepend")
+      }
+    )
+  }
+
+  object Cmd {
+    import play.api.libs.json._
+    import Serializers.emptySingletonFormat
+    import SharedFormats._
+
+    val serializers = Vector(
+      Serializers(Json.format[Add]),
+      Serializers(Json.format[ChangeMode]),
+      Serializers(emptySingletonFormat(Get)),
+      Serializers(emptySingletonFormat(UndefinedCmd)),
+      Serializers(emptySingletonFormat(GetAddress))
+    )
+
+  }
+
+  sealed trait Cmd extends Jsonable
 
   case object Get extends Cmd with ReplyType[State]
 
   final case class Add(element: String, times: Int = 1) extends Cmd with ReplyType[Evt]
 
-  // TODO how to do serialization of "scala enum", i.e. sealed trait
   sealed trait Mode
   object Mode {
-    object Prepend extends Mode
-    object Append extends Mode
+    case object Prepend extends Mode
+    case object Append extends Mode
   }
 
   final case class ChangeMode(mode: Mode) extends Cmd with ReplyType[Evt]
@@ -35,11 +75,22 @@ object TestEntity {
   object Evt {
     val NumShards = 4
     // second param is optional, defaults to the class name
-    val aggregateEventShards = AggregateEventTag.sharded(classOf[Evt], NumShards)
+    val aggregateEventShards = AggregateEventTag.sharded[Evt](NumShards)
+
+    import play.api.libs.json._
+    import Serializers.emptySingletonFormat
+    import SharedFormats._
+
+    val serializers = Vector(
+      // events
+      Serializers(Json.format[Appended]),
+      Serializers(Json.format[Prepended]),
+      Serializers(emptySingletonFormat(InPrependMode)),
+      Serializers(emptySingletonFormat(InAppendMode))
+    )
   }
 
-  // FIXME try with Jsonable
-  sealed trait Evt extends AggregateEvent[Evt] {
+  sealed trait Evt extends AggregateEvent[Evt] with Jsonable {
     override def aggregateTag: AggregateEventShards[Evt] = Evt.aggregateEventShards
   }
 
@@ -53,10 +104,16 @@ object TestEntity {
 
   object State {
     val empty: State = State(Mode.Append, Nil)
+
+    import play.api.libs.json._
+    import Serializers.emptySingletonFormat
+    import SharedFormats._
+    val serializers = Vector(
+      Serializers(Json.format[State])
+    )
   }
 
-  // FIXME try with Jsonable
-  final case class State(mode: Mode, elements: List[String]) {
+  final case class State(mode: Mode, elements: List[String]) extends Jsonable {
     def add(elem: String): State = mode match {
       case Mode.Prepend => new State(mode, elem +: elements)
       case Mode.Append  => new State(mode, elements :+ elem)
@@ -67,9 +124,23 @@ object TestEntity {
   final case class AfterRecovery(state: State)
 }
 
-class TestEntity @Inject() (system: ActorSystem, probe: Option[ActorRef] = None)
+class TestEntitySerializerRegistry extends SerializerRegistry {
+  import TestEntity._
+
+  override def serializers: immutable.Seq[Serializers[_]] = Cmd.serializers ++ Evt.serializers ++ State.serializers
+
+}
+
+class TestEntity(system: ActorSystem)
   extends PersistentEntity[TestEntity.Cmd, TestEntity.Evt, TestEntity.State] {
   import TestEntity._
+
+  def this(system: ActorSystem, probe: Option[ActorRef]) = {
+    this(system)
+    this.probe = probe
+  }
+
+  var probe: Option[ActorRef] = None
 
   override def initialState: State = State.empty
 
@@ -78,23 +149,28 @@ class TestEntity @Inject() (system: ActorSystem, probe: Option[ActorRef] = None)
     case State(Mode.Prepend, _) => prepending
   }
 
-  private val changeMode: CommandHandler = {
-    case (c @ ChangeMode(mode), ctx, state) => {
-      mode match {
-        case mode if state.mode == mode => ctx.done
-        case Mode.Append                => ctx.thenPersist(InAppendMode, ctx.reply(c, _))
-        case Mode.Prepend               => ctx.thenPersist(InPrependMode, ctx.reply(c, _))
+  private val changeMode: Actions = {
+    Actions()
+      .onCommand[ChangeMode, Evt] {
+        case (ChangeMode(mode), ctx, state) => {
+          mode match {
+            case mode if state.mode == mode => ctx.done
+            case Mode.Append                => ctx.thenPersist(InAppendMode, ctx.reply)
+            case Mode.Prepend               => ctx.thenPersist(InPrependMode, ctx.reply)
+          }
+        }
       }
-    }
   }
 
   val baseActions: Actions = {
     Actions()
-      .onReadOnlyCommand {
-        case (Get, ctx, state)        => ctx.reply(Get, state)
-        case (GetAddress, ctx, state) => ctx.reply(GetAddress, Cluster.get(system).selfAddress)
+      .onReadOnlyCommand[Get.type, State] {
+        case (Get, ctx, state) => ctx.reply(state)
       }
-      .onCommand(changeMode)
+      .onReadOnlyCommand[GetAddress.type, Address] {
+        case (GetAddress, ctx, state) => ctx.reply(Cluster.get(system).selfAddress)
+      }
+      .orElse(changeMode)
   }
 
   private val appending: Actions =
@@ -103,8 +179,8 @@ class TestEntity @Inject() (system: ActorSystem, probe: Option[ActorRef] = None)
         case (Appended(elem), state) => state.add(elem)
         case (InPrependMode, state)  => state.copy(mode = Mode.Prepend)
       }
-      .onCommand {
-        case (a @ Add(elem, times), ctx, state) =>
+      .onCommand[Add, Evt] {
+        case (Add(elem, times), ctx, state) =>
           // note that null should trigger NPE, for testing exception
           if (elem == null)
             throw new SimulatedNullpointerException
@@ -114,9 +190,9 @@ class TestEntity @Inject() (system: ActorSystem, probe: Option[ActorRef] = None)
           }
           val appended = Appended(elem.toUpperCase)
           if (times == 1)
-            ctx.thenPersist(appended, ctx.reply(a, _))
+            ctx.thenPersist(appended, ctx.reply)
           else
-            ctx.thenPersistAll(List.fill(times)(appended), () => ctx.reply(a, appended))
+            ctx.thenPersistAll(List.fill(times)(appended), () => ctx.reply(appended))
       }
 
   private val prepending: Actions =
@@ -125,17 +201,17 @@ class TestEntity @Inject() (system: ActorSystem, probe: Option[ActorRef] = None)
         case (Prepended(elem), state) => state.add(elem)
         case (InAppendMode, state)    => state.copy(mode = Mode.Append)
       }
-      .onCommand {
-        case (a @ Add(elem, times), ctx, state) =>
+      .onCommand[Add, Evt] {
+        case (Add(elem, times), ctx, state) =>
           if (elem == null || elem.length == 0) {
             ctx.invalidCommand("element must not be empty");
             ctx.done
           }
-          val prepended = Prepended(elem.toUpperCase)
+          val prepended = Prepended(elem.toLowerCase)
           if (times == 1)
-            ctx.thenPersist(prepended, ctx.reply(a, _))
+            ctx.thenPersist(prepended, ctx.reply)
           else
-            ctx.thenPersistAll(List.fill(times)(prepended), () => ctx.reply(a, prepended))
+            ctx.thenPersistAll(List.fill(times)(prepended), () => ctx.reply(prepended))
       }
 
   override def recoveryCompleted(state: State): State = {
@@ -144,3 +220,4 @@ class TestEntity @Inject() (system: ActorSystem, probe: Option[ActorRef] = None)
   }
 
 }
+
