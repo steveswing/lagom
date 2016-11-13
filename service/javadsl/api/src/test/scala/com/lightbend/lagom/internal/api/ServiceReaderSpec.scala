@@ -17,6 +17,7 @@ import com.lightbend.lagom.api.mock.{ BlogService, MockService }
 import org.scalatest._
 import com.lightbend.lagom.api.mock.ScalaMockService
 import com.lightbend.lagom.api.mock.ScalaMockServiceWrong
+import com.lightbend.lagom.internal.javadsl.api.{ JacksonPlaceholderExceptionSerializer, JacksonPlaceholderSerializerFactory, MethodServiceCallHolder, ServiceReader }
 import com.lightbend.lagom.javadsl.api.{ Descriptor, Service, ServiceCall }
 
 import scala.reflect.ClassTag
@@ -54,6 +55,13 @@ class ServiceReaderSpec extends WordSpec with Matchers with Inside {
       intercept[IllegalArgumentException] {
         ServiceReader.readServiceDescriptor(getClass.getClassLoader, classOf[ScalaMockServiceWrong])
       }
+    }
+
+    "fail to read a Java service descriptor from a non-public interface (and report it in a user-friendly manner)" in {
+      val caught = intercept[IllegalArgumentException] {
+        ServiceReader.readServiceDescriptor(getClass.getClassLoader, classOf[NotPublicInterfaceService])
+      }
+      caught.getMessage should ===("Service API must be described in a public interface.")
     }
 
     "resolve the service descriptor path param serializers" in {

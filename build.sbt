@@ -70,12 +70,23 @@ def common: Seq[Setting[_]] = releaseSettings ++ bintraySettings ++ Seq(
     <dependencyManagement>
       <dependencies>
         {
+        // Here we force the version of every Akka and Netty dependency, since Mavens transitive dependency resolution
+        // strategy is so incredibly lame, without using dependency management to force it, you can count on always
+        // getting the version you least want.
+        // Eventually we should automate this somehow to force the versions of all dependencies to be the same as what
+        // sbt resolves, but that's going to require some sbt voodoo. For now, this does the job well enough.
         // todo - put this in a parent pom rather than in each project
         Seq("buffer", "codec", "codec-http", "common", "handler", "transport", "transport-native-epoll").map { nettyDep =>
           <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-{nettyDep}</artifactId>
             <version>{NettyVersion}</version>
+          </dependency>
+        } ++ Seq("actor", "cluster-sharding", "cluster-tools", "cluster", "persistence-query-experimental", "persistence", "protobuf", "remote", "slf4j", "stream-testkit", "stream", "testkit").map { akkaDep =>
+          <dependency>
+            <groupId>com.typesafe.akka</groupId>
+            <artifactId>akka-{akkaDep}_{scalaBinaryVersion.value}</artifactId>
+            <version>{AkkaVersion}</version>
           </dependency>
         }
         }
@@ -207,49 +218,68 @@ def multiJvmTestSettings: Seq[Setting[_]] = SbtMultiJvm.multiJvmSettings ++ Seq(
   }
 )
 
+def macroCompileSettings: Seq[Setting[_]] = Seq(
+  compile in Test ~= { a =>
+    // Delete classes in "compile" packages after compiling.
+    // These are used for compile-time tests and should be recompiled every time.
+    val products = a.relations.allProducts.toSeq ** new SimpleFileFilter(_.getParentFile.getName == "compile")
+    IO.delete(products.get)
+    a
+  }
+)
+
 val javadslProjects = Seq[ProjectReference](
   `api-javadsl`,
   `server-javadsl`,
   `client-javadsl`,
-  `broker-javadsl`
-)
-
-val coreProjects = Seq[ProjectReference](
-  `api-tools`,
-  spi,
-  jackson,
-  `play-json`,
-  core,
-  `cluster-core`,
+  `broker-javadsl`,
   `cluster-javadsl`,
-  `cluster-scaladsl`,
-  pubsub,
-  `kafka-client`,
-  `kafka-broker`,
-  `persistence-core`,
   `persistence-javadsl`,
-  `persistence-scaladsl`,
-  `persistence-cassandra-core`,
   `persistence-cassandra-javadsl`,
-  `persistence-cassandra-scaladsl`,
-  `persistence-jdbc-core`,
   `persistence-jdbc-javadsl`,
-  `persistence-jdbc-scaladsl`,
+  pubsub,
+  jackson,
   `testkit-javadsl`,
-  `testkit-scaladsl`,
-  logback,
   immutables,
   `integration-client-javadsl`
 )
 
+val scaladslProjects = Seq[ProjectReference](
+  `api-scaladsl`,
+  `client-scaladsl`,
+  `server-scaladsl`,
+  `cluster-scaladsl`,
+  `persistence-scaladsl`,
+  `persistence-cassandra-scaladsl`,
+  `persistence-jdbc-scaladsl`,
+  `testkit-scaladsl`
+)
+
+val coreProjects = Seq[ProjectReference](
+  `api-tools`,
+  api,
+  client,
+  server,
+  spi,
+  `play-json`,
+  `cluster-core`,
+  `kafka-client`,
+  `kafka-broker`,
+  `persistence-core`,
+  `persistence-cassandra-core`,
+  `persistence-jdbc-core`,
+  logback
+)
+
 val otherProjects = Seq[ProjectReference](
   `dev-environment`,
-  `integration-tests-javadsl`
+  `integration-tests-javadsl`,
+  `integration-tests-scaladsl`
 )
 
 lazy val root = (project in file("."))
   .settings(name := "lagom")
-  .settings(common: _*)
+  .settings(runtimeLibCommon: _*)
   .settings(
     PgpKeys.publishSigned := {},
     publishLocal := {},
@@ -257,14 +287,29 @@ lazy val root = (project in file("."))
     publish := {}
   )
   .enablePlugins(lagom.UnidocRoot)
-  .settings(UnidocRoot.settings(Nil, otherProjects ++
-    Seq[ProjectReference](`sbt-scripted-library`, `sbt-scripted-tools`)): _*)
+  .settings(UnidocRoot.settings(javadslProjects, scaladslProjects): _*)
   .aggregate(javadslProjects: _*)
+  .aggregate(scaladslProjects: _*)
   .aggregate(coreProjects: _*)
   .aggregate(otherProjects: _*)
 
 def RuntimeLibPlugins = AutomateHeaderPlugin && Sonatype && PluginsAccessor.exclude(BintrayPlugin) 
 def SbtPluginPlugins = AutomateHeaderPlugin && BintrayPlugin && PluginsAccessor.exclude(Sonatype) 
+
+lazy val api = (project in file("service/core/api"))
+  .settings(runtimeLibCommon: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(
+    name := "lagom-api",
+    libraryDependencies ++= Seq(
+      "org.scala-lang.modules" %% "scala-parser-combinators" % "1.0.4",
+      "com.typesafe.akka" %% "akka-actor" % AkkaVersion,
+      "com.typesafe.akka" %% "akka-slf4j" % AkkaVersion,
+      "com.typesafe.akka" %% "akka-stream" % AkkaVersion,
+      "com.typesafe.play" %% "play" % PlayVersion
+    )
+  )
+
 
 lazy val `api-javadsl` = (project in file("service/javadsl/api"))
   .settings(name := "lagom-javadsl-api")
@@ -273,19 +318,25 @@ lazy val `api-javadsl` = (project in file("service/javadsl/api"))
   .settings(
     libraryDependencies ++= Seq(
       "com.typesafe.play" %% "play-java" % PlayVersion,
-      "com.typesafe.akka" %% "akka-actor" % AkkaVersion,
-      "com.typesafe.akka" %% "akka-slf4j" % AkkaVersion,
-      "com.typesafe.akka" %% "akka-stream" % AkkaVersion,
       // An explicit depnedency is added on Guava because mavens resolution rule is stupid - it doesn't use the most
       // recent version in the tree, it uses the version that's closest to the root of the tree. So this puts the
       // version we need closer to the root of the tree.
       guava,
       "org.pcollections" % "pcollections" % "2.1.2",
-      "org.scala-lang.modules" %% "scala-parser-combinators" % "1.0.4",
       scalaTest % Test,
       "com.fasterxml.jackson.module" % "jackson-module-parameter-names" % JacksonVersion % Test
     )
-  ).dependsOn(spi)
+  ).dependsOn(api)
+
+lazy val `api-scaladsl` = (project in file("service/scaladsl/api"))
+  .settings(name := "lagom-scaladsl-api")
+  .settings(runtimeLibCommon: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(
+    libraryDependencies ++= Seq(
+      scalaTest % Test
+    )
+  ).dependsOn(api)
 
 lazy val immutables = (project in file("immutables"))
   .settings(name := "lagom-javadsl-immutables")
@@ -344,29 +395,52 @@ lazy val `api-tools` = (project in file("api-tools"))
     `server-javadsl` % "compile->test"
   )
 
-lazy val core = (project in file("core"))
-  .settings(name := "lagom-core")
-  .settings(runtimeLibCommon: _*)
-  .enablePlugins(RuntimeLibPlugins)
-  .dependsOn(`api-javadsl`, jackson)
-
-lazy val `client-javadsl` = (project in file("service/javadsl/client"))
-  .settings(name := "lagom-javadsl-client")
+lazy val client = (project in file("service/core/client"))
   .settings(runtimeLibCommon: _*)
   .enablePlugins(RuntimeLibPlugins)
   .settings(
+    name := "lagom-client",
     libraryDependencies ++= Seq(
       "com.typesafe.play" %% "play-ws" % PlayVersion,
       "io.dropwizard.metrics" % "metrics-core" % "3.1.2"
     )
+  ).dependsOn(api, spi)
+
+lazy val `client-javadsl` = (project in file("service/javadsl/client"))
+  .settings(runtimeLibCommon: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-javadsl-client")
+  .dependsOn(client, `api-javadsl`, jackson)
+
+lazy val `client-scaladsl` = (project in file("service/scaladsl/client"))
+  .settings(runtimeLibCommon: _*)
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(macroCompileSettings: _*)
+  .settings(
+    name := "lagom-scaladsl-client",
+    libraryDependencies ++= Seq(
+      scalaTest % Test
+    )
   )
-  .dependsOn(core)
+  .dependsOn(client, `api-scaladsl`, `macro-testkit` % Test)
 
 lazy val `integration-client-javadsl` = (project in file("service/javadsl/integration-client"))
   .settings(name := "lagom-javadsl-integration-client")
   .settings(runtimeLibCommon: _*)
   .enablePlugins(RuntimeLibPlugins)
   .dependsOn(`client-javadsl`, `service-registry-client`, `kafka-client`)
+
+lazy val server = (project in file("service/core/server"))
+  .settings(
+    name := "lagom-server",
+    libraryDependencies ++= Seq(
+      "com.typesafe.akka" %% "akka-actor" % AkkaVersion
+    )
+  )
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(runtimeLibCommon: _*)
+  .dependsOn(client)
+
 
 lazy val `server-javadsl` = (project in file("service/javadsl/server"))
   .settings(
@@ -378,7 +452,18 @@ lazy val `server-javadsl` = (project in file("service/javadsl/server"))
   )
   .enablePlugins(RuntimeLibPlugins)
   .settings(runtimeLibCommon: _*)
-  .dependsOn(core, `client-javadsl`, immutables % "provided")
+  .dependsOn(server, `client-javadsl`, immutables % "provided")
+
+lazy val `server-scaladsl` = (project in file("service/scaladsl/server"))
+  .settings(
+    name := "lagom-scaladsl-server",
+    libraryDependencies ++= Seq(
+      "com.typesafe.akka" %% "akka-actor" % AkkaVersion
+    )
+  )
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(runtimeLibCommon: _*)
+  .dependsOn(server, `client-scaladsl`)
 
 lazy val `testkit-javadsl` = (project in file("testkit/javadsl"))
   .settings(name := "lagom-javadsl-testkit")
@@ -413,7 +498,7 @@ lazy val `testkit-scaladsl` = (project in file("testkit/scaladsl"))
   .dependsOn(`persistence-core` % "compile;test->test", `persistence-scaladsl` % "compile;test->test", `persistence-cassandra-scaladsl` % "test->test")
 
 lazy val `integration-tests-javadsl` = (project in file("service/javadsl/integration-tests"))
-  .settings(name := "lagom-service-integration-tests")
+  .settings(name := "lagom-javadsl-integration-tests")
   .settings(runtimeLibCommon: _*)
   .enablePlugins(AutomateHeaderPlugin)
   .settings(forkedTests: _*)
@@ -427,6 +512,22 @@ lazy val `integration-tests-javadsl` = (project in file("service/javadsl/integra
     publish := {}
   )
   .dependsOn(`server-javadsl`, `persistence-cassandra-javadsl`, pubsub, `testkit-javadsl`, logback,`integration-client-javadsl`)
+
+lazy val `integration-tests-scaladsl` = (project in file("service/scaladsl/integration-tests"))
+  .settings(name := "lagom-scaladsl-integration-tests")
+  .settings(runtimeLibCommon: _*)
+  .enablePlugins(AutomateHeaderPlugin)
+  .settings(forkedTests: _*)
+  .settings(
+    libraryDependencies ++= Seq(
+      "com.typesafe.play" %% "play-netty-server" % PlayVersion,
+      "com.novocode" % "junit-interface" % "0.11" % "test",
+      scalaTest
+    ),
+    PgpKeys.publishSigned := {},
+    publish := {}
+  )
+  .dependsOn(`server-scaladsl`, logback)
 
 // for forked tests, necessary for Cassandra
 def forkedTests: Seq[Setting[_]] = Seq(
@@ -515,7 +616,7 @@ lazy val pubsub = (project in file("pubsub"))
 
 lazy val `persistence-core` = (project in file("persistence/core"))
   .settings(name := "lagom-persistence-core")
-  .dependsOn(`cluster-core`, `api-javadsl`) // FIXME replace api-javadsl dependency, ServiceLocatorHolder
+  .dependsOn(`cluster-core`)
   .settings(runtimeLibCommon: _*)
   .settings(Protobuf.settings)
   .enablePlugins(RuntimeLibPlugins)
@@ -525,6 +626,7 @@ lazy val `persistence-core` = (project in file("persistence/core"))
       "com.typesafe.akka" %% "akka-persistence" % AkkaVersion,
       "com.typesafe.akka" %% "akka-persistence-query-experimental" % AkkaVersion,
       "com.typesafe.akka" %% "akka-cluster-sharding" % AkkaVersion,
+      "com.typesafe.play" %% "play" % PlayVersion,
       "com.typesafe.akka" %% "akka-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-multi-node-testkit" % AkkaVersion % "test",
       "com.typesafe.akka" %% "akka-stream-testkit" % AkkaVersion % "test",
@@ -565,7 +667,7 @@ lazy val `persistence-cassandra-core` = (project in file("persistence-cassandra/
 lazy val `persistence-cassandra-javadsl` = (project in file("persistence-cassandra/javadsl"))
   .settings(name := "lagom-javadsl-persistence-cassandra")
   .dependsOn(`persistence-core` % "compile;test->test", `persistence-javadsl` % "compile;test->test",
-    `persistence-cassandra-core` % "compile;test->test")
+    `persistence-cassandra-core` % "compile;test->test", `api-javadsl`)
   .settings(runtimeLibCommon: _*)
   .settings(multiJvmTestSettings: _*)
   .enablePlugins(RuntimeLibPlugins)
@@ -575,7 +677,7 @@ lazy val `persistence-cassandra-javadsl` = (project in file("persistence-cassand
 lazy val `persistence-cassandra-scaladsl` = (project in file("persistence-cassandra/scaladsl"))
   .settings(name := "lagom-scaladsl-persistence-cassandra")
   .dependsOn(`persistence-core` % "compile;test->test", `persistence-scaladsl` % "compile;test->test",
-    `persistence-cassandra-core` % "compile;test->test")
+    `persistence-cassandra-core` % "compile;test->test", `api-scaladsl`)
   .settings(runtimeLibCommon: _*)
   .settings(multiJvmTestSettings: _*)
   .enablePlugins(RuntimeLibPlugins)
@@ -662,7 +764,7 @@ lazy val `dev-environment` = (project in file("dev"))
   .settings(common: _*)
   .enablePlugins(AutomateHeaderPlugin)
   .aggregate(`build-link`, `reloadable-server`, `build-tool-support`, `sbt-plugin`, `maven-plugin`, `service-locator`,
-    `service-registration`, `cassandra-server`, `cassandra-registration`,  `play-integration`, `service-registry-client`,
+    `service-registration`, `cassandra-server`, `play-integration`, `service-registry-client`,
     `maven-java-archetype`, `kafka-server`)
   .settings(
     publish := {},
@@ -758,6 +860,7 @@ lazy val `maven-plugin` = (project in file("dev") / "maven-plugin")
       s"-Dlagom.version=${version.value}",
       s"-DarchetypeVersion=${version.value}",
       s"-Dplay.version=$PlayVersion",
+      s"-Dakka.version=$AkkaVersion",
       s"-Dscala.binary.version=${(scalaBinaryVersion in `api-javadsl`).value}",
       "-Dorg.slf4j.simpleLogger.showLogName=false",
       "-Dorg.slf4j.simpleLogger.showThreadName=false"
@@ -835,6 +938,14 @@ def stopTick(): Unit = synchronized {
   }
 }
 
+def archetypeVariables(lagomVersion: String) = Map(
+  "LAGOM-VERSION" -> lagomVersion,
+  "PLAY-VERSION" -> PlayVersion,
+  "AKKA-VERSION" -> AkkaVersion
+)
+
+val ArchetypeVariablePattern = "%([A-Z-]+)%".r
+
 def archetypeProject(archetypeName: String) =
   Project(s"maven-$archetypeName-archetype", file("dev") / "archetypes" / s"maven-$archetypeName")
     .settings(common: _*)
@@ -847,9 +958,14 @@ def archetypeProject(archetypeName: String) =
         val pomFile = (classDirectory in Compile).value / "archetype-resources" / "pom.xml"
         if (pomFile.exists()) {
           val pomXml = IO.read(pomFile)
-          if (pomXml.contains("%LAGOM-VERSION%")) {
-            IO.write(pomFile, pomXml.replaceAll("%LAGOM-VERSION%", version.value))
-          }
+          val variables = archetypeVariables(version.value)
+          val newPomXml = ArchetypeVariablePattern.replaceAllIn(pomXml, m =>
+            variables.get(m.group(1)) match {
+              case Some(replacement) => replacement
+              case None => m.matched
+            }
+          )
+          IO.write(pomFile, newPomXml)
         }
         (copyResources in Compile).value
       }
@@ -900,12 +1016,6 @@ lazy val `service-registration` = (project in file("dev") / "service-registratio
   .enablePlugins(RuntimeLibPlugins)
   .dependsOn(`server-javadsl`, `service-registry-client`)
 
-lazy val `cassandra-registration` = (project in file("dev") / "cassandra-registration")
-  .settings(name := "lagom-cassandra-registration")
-  .settings(runtimeLibCommon: _*)
-  .enablePlugins(RuntimeLibPlugins)
-  .dependsOn(`api-javadsl`, `persistence-cassandra-javadsl`, `service-registry-client`)
-
 lazy val `play-integration` = (project in file("dev") / "play-integration")
   .settings(name := "lagom-play-integration")
   .settings(runtimeLibCommon: _*)
@@ -954,3 +1064,10 @@ lazy val `kafka-server` = (project in file("dev") / "kafka-server")
       scalaTest % Test
     )
   )
+
+// Provides macros for testing macros. Is not aggregated or published.
+lazy val `macro-testkit` = (project in file("macro-testkit"))
+  .settings(runtimeLibCommon)
+  .settings(libraryDependencies ++= Seq(
+    "org.scala-lang" % "scala-reflect" % scalaVersion.value
+  ))

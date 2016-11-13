@@ -5,9 +5,10 @@ package lagom
 
 import sbt._
 import sbtunidoc.Plugin.UnidocKeys._
-import sbtunidoc.Plugin.{ ScalaUnidoc, JavaUnidoc, Genjavadoc, javaUnidocSettings, baseGenjavadocExtraTasks }
+import sbtunidoc.Plugin.{Genjavadoc, JavaUnidoc, ScalaUnidoc, scalaJavaUnidocSettings}
 import sbt.Keys._
 import sbt.File
+import sbt.ScopeFilter.ProjectFilter
 
 object Scaladoc extends AutoPlugin {
 
@@ -40,13 +41,15 @@ object UnidocRoot extends AutoPlugin {
 
   override def trigger = noTrigger
 
-  def settings(ignoreAggregates: Seq[ProjectReference], ignoreProjects: Seq[ProjectReference]) = {
-    val withoutAggregates = ignoreAggregates.foldLeft(inAnyProject) { _ -- inAggregates(_, transitive = true, includeRoot = true) }
-    val docProjectFilter = ignoreProjects.foldLeft(withoutAggregates) { _ -- inProjects(_) }
+  private def projectsAndDependencies(projects: Seq[ProjectReference]): ProjectFilter = {
+    //projects.map(p => inDependencies(p, transitive = true, includeRoot = true)).reduce(_ || _)
+    projects.map(p => inProjects(p)).reduce(_ || _)
+  }
 
+  def settings(javadslProjects: Seq[ProjectReference], scaladslProjects: Seq[ProjectReference]) = {
     inTask(unidoc)(Seq(
-      unidocProjectFilter in ScalaUnidoc := docProjectFilter,
-      unidocProjectFilter in JavaUnidoc := docProjectFilter,
+      unidocProjectFilter in ScalaUnidoc := projectsAndDependencies(scaladslProjects),
+      unidocProjectFilter in JavaUnidoc := projectsAndDependencies(javadslProjects),
       apiMappings in ScalaUnidoc := (apiMappings in (Compile, doc)).value
     ))
   }
@@ -75,23 +78,42 @@ object UnidocRoot extends AutoPlugin {
       |  }
       |</script>""".stripMargin.replaceAll("\n", "\\\\n").replaceAll("\"", "\\\\\"")
 
-  override lazy val projectSettings = javaUnidocSettings ++ Seq(
+  override lazy val projectSettings = scalaJavaUnidocSettings ++ Seq(
     unidocAllSources in (JavaUnidoc, unidoc) ++= allGenjavadocSources.value,
     unidocAllSources in (JavaUnidoc, unidoc) := {
       (unidocAllSources in (JavaUnidoc, unidoc)).value
         .map(_.filterNot(f => excludeJavadoc.exists(f.getCanonicalPath.contains)))
       },
+    scalacOptions in (ScalaUnidoc, unidoc) ++= Seq("-skip-packages", "com.lightbend.lagom.internal"),
     javacOptions in doc := Seq(
       "-windowtitle", "Lagom Services API",
       "-public",
-      "-group", "Services API", packageList("com.lightbend.lagom.javadsl", "com.lightbend.lagom.javadsl.api",
-          "com.lightbend.lagom.javadsl.client", "com.lightbend.lagom.javadsl.server",
-          "com.lightbend.lagom.javadsl.api.deser", "com.lightbend.lagom.javadsl.api.paging"),
-      "-group", "Persistence", packageList("com.lightbend.lagom.javadsl.persistence",
-          "com.lightbend.lagom.javadsl.persistence.cassandra",
-          "com.lightbend.lagom.javadsl.persistence.testkit"),
-      "-group", "Cluster", packageList("com.lightbend.lagom.javadsl.pubsub", "com.lightbend.lagom.javadsl.cluster"),
-
+      "-group", "Services API", packageList(
+        "com.lightbend.lagom.javadsl",
+        "com.lightbend.lagom.javadsl.api",
+        "com.lightbend.lagom.javadsl.client",
+        "com.lightbend.lagom.javadsl.server",
+        "com.lightbend.lagom.javadsl.api.deser",
+        "com.lightbend.lagom.javadsl.api.paging"
+      ),
+      "-group", "Persistence", packageList(
+        "com.lightbend.lagom.javadsl.persistence",
+        "com.lightbend.lagom.javadsl.persistence.cassandra",
+        "com.lightbend.lagom.javadsl.persistence.cassandra.testkit",
+        "com.lightbend.lagom.javadsl.persistence.jdbc",
+        "com.lightbend.lagom.javadsl.persistence.jdbc.testkit",
+        "com.lightbend.lagom.javadsl.persistence.testkit"
+      ),
+      "-group", "Cluster", packageList(
+        "com.lightbend.lagom.javadsl.pubsub",
+        "com.lightbend.lagom.javadsl.cluster"
+      ),
+      "-group", "Message Broker", packageList(
+        "com.lightbend.lagom.javadsl.api.broker",
+        "com.lightbend.lagom.javadsl.api.broker.kafka",
+        "com.lightbend.lagom.javadsl.broker",
+        "com.lightbend.lagom.javadsl.broker.kafka"
+      ),
       "-noqualifier", "java.lang",
       "-encoding", "UTF-8", 
       "-source", "1.8",
