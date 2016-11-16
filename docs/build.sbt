@@ -24,7 +24,8 @@ lazy val docs = project
       "com.novocode" % "junit-interface" % "0.11" % "test",
       "org.scalatest" %% "scalatest" % "2.2.4" % Test,
       "com.typesafe.play" %% "play-netty-server" % PlayVersion % Test,
-      "com.typesafe.play" %% "play-logback" % PlayVersion % Test
+      "com.typesafe.play" %% "play-logback" % PlayVersion % Test,
+      "org.apache.logging.log4j" % "log4j-api" % "2.7" % "test"
     ),
     javacOptions ++= Seq("-encoding", "UTF-8", "-source", "1.8", "-target", "1.8", "-parameters", "-Xlint:unchecked", "-Xlint:deprecation"),
     testOptions in Test += Tests.Argument("-oDF"),
@@ -62,13 +63,16 @@ lazy val docs = project
     markdownStageIncludeWebJars := false,
     markdownSourceUrl := Some(url(s"https://github.com/lagom/lagom/edit/$branch/docs/manual/"))
 
-  ).dependsOn(serviceIntegrationTests, persistenceJdbc, kafkaBroker, immutables % "test->compile", theme % "run-markdown")
+  ).dependsOn(serviceIntegrationTests, persistenceJdbcJavadsl, persistenceJdbcScaladsl, testkitScaladsl,
+      kafkaBroker, immutables % "test->compile", theme % "run-markdown")
 
 lazy val parentDir = Path.fileProperty("user.dir").getParentFile
 
 // Depend on the integration tests, they should bring everything else in
 lazy val serviceIntegrationTests = ProjectRef(parentDir, "integration-tests-javadsl")
-lazy val persistenceJdbc = ProjectRef(parentDir, "persistence-jdbc-javadsl")
+lazy val persistenceJdbcJavadsl = ProjectRef(parentDir, "persistence-jdbc-javadsl")
+lazy val persistenceJdbcScaladsl = ProjectRef(parentDir, "persistence-jdbc-scaladsl")
+lazy val testkitScaladsl = ProjectRef(parentDir, "testkit-scaladsl")
 lazy val kafkaBroker = ProjectRef(parentDir, "kafka-broker")
 
 // Needed to compile test classes using immutables annotation
