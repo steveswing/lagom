@@ -6,8 +6,10 @@ package com.lightbend.lagom.scaladsl.persistence
 import akka.Done
 import akka.event.Logging
 import akka.stream.scaladsl.Flow
+
 import scala.concurrent.Future
 import akka.NotUsed
+import akka.persistence.query.{ NoOffset, Offset }
 
 object ReadSideProcessor {
   /**
@@ -60,6 +62,7 @@ object ReadSideProcessor {
      */
     def handle(): Flow[EventStreamElement[Event], Done, NotUsed]
   }
+
 }
 
 /**

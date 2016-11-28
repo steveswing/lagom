@@ -95,6 +95,8 @@ class TestRegistry3 extends SerializerRegistry {
   )
 }
 
+case class Box(surprise: Option[String])
+
 class PlayJsonSerializerSpec extends WordSpec with Matchers {
 
   "The PlayJsonSerializer" should {
@@ -175,6 +177,20 @@ class PlayJsonSerializerSpec extends WordSpec with Matchers {
 
       deserialized should be(event)
 
+    }
+
+  }
+
+  "The provided serializers" should {
+
+    object Singleton
+
+    "serialize and deserialize singletons" in {
+      val serializer = Serializers.emptySingletonFormat(Singleton)
+
+      val result = serializer.reads(serializer.writes(Singleton))
+      result.isSuccess shouldBe true
+      result.get shouldBe Singleton
     }
 
   }

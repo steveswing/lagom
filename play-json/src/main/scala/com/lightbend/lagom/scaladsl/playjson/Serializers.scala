@@ -39,6 +39,7 @@ object Serializers {
  * Describes how to serialize and deserialize a type using play-json
  */
 sealed trait Serializers[T] {
+  // the reason we need it over Format is to capture the type here
   def entityClass: Class[T]
   def reads: Reads[T]
   def writes: Writes[T]

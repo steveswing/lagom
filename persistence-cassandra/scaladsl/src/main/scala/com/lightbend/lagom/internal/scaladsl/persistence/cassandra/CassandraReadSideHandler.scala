@@ -3,10 +3,12 @@
  */
 package com.lightbend.lagom.internal.scaladsl.persistence.cassandra
 
+import akka.persistence.query.Offset
 import akka.stream.ActorAttributes
 import akka.stream.scaladsl.Flow
 import akka.{ Done, NotUsed }
 import com.datastax.driver.core.{ BatchStatement, BoundStatement }
+import com.lightbend.lagom.internal.persistence.cassandra.{ CassandraOffsetDao, CassandraOffsetStore }
 import com.lightbend.lagom.scaladsl.persistence.ReadSideProcessor.ReadSideHandler
 import com.lightbend.lagom.scaladsl.persistence._
 import com.lightbend.lagom.scaladsl.persistence.cassandra.CassandraSession

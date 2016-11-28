@@ -5,12 +5,13 @@ package com.lightbend.lagom.internal.scaladsl.persistence.jdbc
 
 import java.sql.Connection
 
+import akka.persistence.query.Offset
 import akka.stream.scaladsl.Flow
 import akka.{ Done, NotUsed }
-import com.lightbend.lagom.internal.persistence.jdbc.SlickProvider
+import com.lightbend.lagom.internal.persistence.jdbc.{ SlickOffsetDao, SlickOffsetStore, SlickProvider }
 import com.lightbend.lagom.scaladsl.persistence.ReadSideProcessor.ReadSideHandler
 import com.lightbend.lagom.scaladsl.persistence.jdbc.JdbcReadSide
-import com.lightbend.lagom.scaladsl.persistence.{ AggregateEvent, AggregateEventTag, EventStreamElement, Offset }
+import com.lightbend.lagom.scaladsl.persistence.{ AggregateEvent, AggregateEventTag, EventStreamElement }
 import org.slf4j.LoggerFactory
 
 import scala.concurrent.{ ExecutionContext, Future }
@@ -19,7 +20,7 @@ import scala.reflect.ClassTag
 /**
  * INTERNAL API
  */
-private[lagom] class JdbcReadSideImpl(slick: SlickProvider, offsetStore: JdbcOffsetStore)(implicit val ec: ExecutionContext) extends JdbcReadSide {
+private[lagom] class JdbcReadSideImpl(slick: SlickProvider, offsetStore: SlickOffsetStore)(implicit val ec: ExecutionContext) extends JdbcReadSide {
 
   private val log = LoggerFactory.getLogger(this.getClass)
 
@@ -57,7 +58,7 @@ private[lagom] class JdbcReadSideImpl(slick: SlickProvider, offsetStore: JdbcOff
     import slick.profile.api._
 
     @volatile
-    private var offsetDao: JdbcOffsetDao = _
+    private var offsetDao: SlickOffsetDao = _
 
     override def globalPrepare(): Future[Done] =
       slick.ensureTablesCreated().flatMap { _ =>

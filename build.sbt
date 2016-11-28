@@ -14,8 +14,8 @@ import com.typesafe.sbt.SbtScalariform.ScalariformKeys
 import de.heikoseeberger.sbtheader.HeaderPattern
 
 val PlayVersion = "2.5.4"
-val AkkaVersion = "2.4.11"
-val AkkaPersistenceCassandraVersion = "0.19"
+val AkkaVersion = "2.4.12"
+val AkkaPersistenceCassandraVersion = "0.20"
 val ScalaTestVersion = "2.2.4"
 val JacksonVersion = "2.7.8"
 val CassandraAllVersion = "3.0.9"
@@ -233,6 +233,8 @@ val javadslProjects = Seq[ProjectReference](
   `server-javadsl`,
   `client-javadsl`,
   `broker-javadsl`,
+  `kafka-client-javadsl`,
+  `kafka-broker-javadsl`,
   `cluster-javadsl`,
   `persistence-javadsl`,
   `persistence-cassandra-javadsl`,
@@ -247,6 +249,9 @@ val javadslProjects = Seq[ProjectReference](
 val scaladslProjects = Seq[ProjectReference](
   `api-scaladsl`,
   `client-scaladsl`,
+  `broker-scaladsl`,
+  `kafka-client-scaladsl`,
+  `kafka-broker-scaladsl`,
   `server-scaladsl`,
   `cluster-scaladsl`,
   `persistence-scaladsl`,
@@ -359,6 +364,9 @@ lazy val jackson = (project in file("jackson"))
   .settings(
     libraryDependencies ++= Seq(      
       "com.fasterxml.jackson.module" % "jackson-module-parameter-names" % JacksonVersion,
+      "com.fasterxml.jackson.core" % "jackson-core" % JacksonVersion,
+      "com.fasterxml.jackson.core" % "jackson-annotations" % JacksonVersion,
+      "com.fasterxml.jackson.core" % "jackson-databind" % JacksonVersion,
       "com.fasterxml.jackson.datatype" % "jackson-datatype-pcollections" % JacksonVersion,
       "com.fasterxml.jackson.datatype" % "jackson-datatype-guava" % JacksonVersion,
       "com.fasterxml.jackson.datatype" % "jackson-datatype-jdk8" % JacksonVersion,
@@ -429,7 +437,7 @@ lazy val `integration-client-javadsl` = (project in file("service/javadsl/integr
   .settings(name := "lagom-javadsl-integration-client")
   .settings(runtimeLibCommon: _*)
   .enablePlugins(RuntimeLibPlugins)
-  .dependsOn(`client-javadsl`, `service-registry-client`, `kafka-client`)
+  .dependsOn(`client-javadsl`, `service-registry-client`, `kafka-client-javadsl`)
 
 lazy val server = (project in file("service/core/server"))
   .settings(
@@ -454,6 +462,8 @@ lazy val `server-javadsl` = (project in file("service/javadsl/server"))
   .enablePlugins(RuntimeLibPlugins)
   .settings(runtimeLibCommon: _*)
   .dependsOn(server, `client-javadsl`, immutables % "provided")
+  // bring jackson closer to the root of the dependency tree to prompt Maven to choose the right version
+  .dependsOn(jackson)
 
 lazy val `server-scaladsl` = (project in file("service/scaladsl/server"))
   .settings(
@@ -694,7 +704,7 @@ lazy val `persistence-jdbc-core` = (project in file("persistence-jdbc/core"))
   .settings(forkedTests: _*)
   .settings(
     libraryDependencies ++= Seq(
-      "com.github.dnvriend" %% "akka-persistence-jdbc" % "2.6.7",
+      "com.github.dnvriend" %% "akka-persistence-jdbc" % "2.6.8",
       "com.typesafe.play" %% "play-jdbc" % PlayVersion
     )
   )
@@ -715,12 +725,23 @@ lazy val `persistence-jdbc-scaladsl` = (project in file("persistence-jdbc/scalad
   .enablePlugins(RuntimeLibPlugins)
   .settings(forkedTests: _*) configs (MultiJvm)
 
-
-
-lazy val `kafka-client` = (project in file("kafka-client"))
+lazy val `broker-javadsl` = (project in file("service/javadsl/broker"))
   .enablePlugins(RuntimeLibPlugins)
-  .settings(name := "lagom-javadsl-kafka-client")
+  .settings(name := "lagom-javadsl-broker")
   .settings(runtimeLibCommon: _*)
+  .dependsOn(`api-javadsl`, `persistence-javadsl`)
+
+lazy val `broker-scaladsl` = (project in file("service/scaladsl/broker"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-scaladsl-broker")
+  .settings(runtimeLibCommon: _*)
+  .dependsOn(`api-scaladsl`, `persistence-scaladsl`)
+
+lazy val `kafka-client` = (project in file("service/core/kafka/client"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-kafka-client")
+  .settings(runtimeLibCommon: _*)
+  .settings(forkedTests: _*)
   .settings(
     libraryDependencies ++= Seq(
       "org.slf4j" % "log4j-over-slf4j" % "1.7.21",
@@ -729,15 +750,27 @@ lazy val `kafka-client` = (project in file("kafka-client"))
       scalaTest % Test
     )
   )
-  .dependsOn(`api-javadsl`)
+  .dependsOn(`api`)
 
-lazy val `broker-javadsl` = (project in file("service/javadsl/broker"))
+lazy val `kafka-client-javadsl` = (project in file("service/javadsl/kafka/client"))
   .enablePlugins(RuntimeLibPlugins)
-  .settings(name := "lagom-javadsl-broker")
+  .settings(name := "lagom-javadsl-kafka-client")
   .settings(runtimeLibCommon: _*)
-  .dependsOn(`api-javadsl`, `persistence-javadsl`)
+  .dependsOn(`api-javadsl`, `kafka-client`)
 
-lazy val `kafka-broker` = (project in file("kafka-broker"))
+lazy val `kafka-client-scaladsl` = (project in file("service/scaladsl/kafka/client"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-scaladsl-kafka-client")
+  .settings(runtimeLibCommon: _*)
+  .dependsOn(`api-scaladsl`, `kafka-client`)
+
+lazy val `kafka-broker` = (project in file("service/core/kafka/server"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-kafka-broker")
+  .settings(runtimeLibCommon: _*)
+  .dependsOn(`api`, `persistence-core`, `kafka-client`)
+
+lazy val `kafka-broker-javadsl` = (project in file("service/javadsl/kafka/server"))
   .enablePlugins(RuntimeLibPlugins)
   .settings(name := "lagom-javadsl-kafka-broker")
   .settings(runtimeLibCommon: _*)
@@ -747,7 +780,19 @@ lazy val `kafka-broker` = (project in file("kafka-broker"))
       scalaTest % Test
     )
   )
-  .dependsOn(`kafka-client`, `broker-javadsl`, `client-javadsl` % "optional", `kafka-server` % Test, logback % Test, `server-javadsl`)
+  .dependsOn(`broker-javadsl`, `kafka-broker`, `kafka-client-javadsl`, `server-javadsl`, `kafka-server` % Test, logback % Test)
+
+lazy val `kafka-broker-scaladsl` = (project in file("service/scaladsl/kafka/server"))
+  .enablePlugins(RuntimeLibPlugins)
+  .settings(name := "lagom-scaladsl-kafka-broker")
+  .settings(runtimeLibCommon: _*)
+  .settings(forkedTests: _*)
+  .settings(
+    libraryDependencies ++= Seq(
+      scalaTest % Test
+    )
+  )
+  .dependsOn(`broker-scaladsl`, `kafka-broker`, `kafka-client-scaladsl`, `server-scaladsl`, `kafka-server` % Test, logback % Test)
 
 lazy val logback = (project in file("logback"))
   .enablePlugins(RuntimeLibPlugins)

@@ -8,7 +8,7 @@ This separation of the write-side and the read-side of the persistent data is of
 
 ## Read-side design
 
-In Lagom, the read-side can be implemented using any datastore, using any library that runs on the JVM to populate and query it. Lagom does provide some helpers for using Cassandra and relational databases, but this are optional, they don't need to be used.
+In Lagom, the read-side can be implemented using any datastore, using any library that runs on the JVM to populate and query it. Lagom does provide some helpers for using Cassandra and relational databases, but they are optional, they don't need to be used.
 
 If you're familiar with a more traditional approach to persistence that uses tables with rows and columns, then implementing the read-side may be a little more familiar than implementing the persistent entities. There is one primary rule though, the read-side should only be updated in response to receiving events from persistent entities.
 

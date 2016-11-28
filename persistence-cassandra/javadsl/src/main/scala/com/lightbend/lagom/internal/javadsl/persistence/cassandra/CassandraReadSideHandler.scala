@@ -12,6 +12,8 @@ import akka.japi.Pair
 import akka.stream.ActorAttributes
 import akka.stream.javadsl.Flow
 import com.datastax.driver.core.{ BatchStatement, BoundStatement }
+import com.lightbend.lagom.internal.javadsl.persistence.OffsetAdapter
+import com.lightbend.lagom.internal.persistence.cassandra.{ CassandraOffsetDao, CassandraOffsetStore }
 import com.lightbend.lagom.javadsl.persistence.Offset.TimeBasedUUID
 import com.lightbend.lagom.javadsl.persistence.ReadSideProcessor.ReadSideHandler
 import com.lightbend.lagom.javadsl.persistence.cassandra.{ CassandraReadSideProcessor, CassandraSession }
@@ -91,7 +93,10 @@ private[cassandra] final class CassandraAutoReadSideHandler[Event <: AggregateEv
     val boundStatements = {
       for {
         statements <- (handler.asInstanceOf[(Event, Offset) => CompletionStage[JList[BoundStatement]]].apply(event, offset).toScala)
-      } yield TreePVector.from(statements).plus(offsetDao.bindSaveOffset(offset)).asInstanceOf[JList[BoundStatement]]
+      } yield {
+        val akkaOffset = OffsetAdapter.dslOffsetToOffset(offset)
+        TreePVector.from(statements).plus(offsetDao.bindSaveOffset(akkaOffset)).asInstanceOf[JList[BoundStatement]]
+      }
     }
 
     boundStatements.toJava
@@ -107,7 +112,7 @@ private[cassandra] final class CassandraAutoReadSideHandler[Event <: AggregateEv
       dao <- offsetStore.prepare(readProcessorId, tag.tag)
     } yield {
       offsetDao = dao
-      dao.loadedOffset
+      OffsetAdapter.offsetToDslOffset(dao.loadedOffset)
     }).toJava
   }
 }
